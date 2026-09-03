@@ -53,7 +53,8 @@ def _load_prompt(input_text: str) -> str:
     prompt_path = Path(__file__).parent.parent / "prompts" / "extract_prompt.txt"
     if prompt_path.exists():
         template = prompt_path.read_text(encoding="utf-8")
-        return template.format(today=today, now=now, year=year, input_text=input_text[:12000])
+        # use replace instead of format to avoid JSON brace conflict
+        return template.replace("{today}", today).replace("{now}", now).replace("{year}", year).replace("{input_text}", input_text[:12000])
     # fallback
     return f"Extract game events as JSON array. Today is {today}. Input:\n{input_text[:12000]}"
 
