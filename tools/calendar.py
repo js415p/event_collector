@@ -117,12 +117,22 @@ def write_events(events: list[dict]) -> dict:
             logger.info(f"[dry-run calendar] would create: {ev.get('title')} {ev.get('start_date')}")
         return {"inserted": 0, "skipped": 0, "error": "no_credentials_dry_run", "calendar_id": calendar_id}
 
-    # 캘린더 존재 확인 (없으면 primary 사용)
+    # 캘린더 존재 확인 — 공유된 그룹 캘린더는 calendarList에 없을 수 있어 insert 시도
     try:
         svc.calendarList().get(calendarId=calendar_id).execute()
     except Exception as e:
-        logger.warning(f"Calendar {calendar_id} not found, falling back to primary: {e}")
-        calendar_id = "primary"
+        msg = str(e)
+        if "404" in msg or "Not Found" in msg:
+            # 공유는 됐지만 목록에 없으면 insert로 추가 (SA가 직접 목록에 등록)
+            try:
+                svc.calendarList().insert(body={"id": calendar_id}).execute()
+                logger.info(f"Calendar {calendar_id} added to service account list via insert")
+            except Exception as ie:
+                logger.warning(f"Calendar {calendar_id} insert failed, falling back to primary: {ie}")
+                calendar_id = "primary"
+        else:
+            logger.warning(f"Calendar {calendar_id} not found, falling back to primary: {e}")
+            calendar_id = "primary"
 
     inserted = 0
     skipped = 0
