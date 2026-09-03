@@ -60,6 +60,50 @@ def is_expired(event: dict, today: date | None = None) -> bool:
     return False
 
 
+KR_KEYWORDS = [
+    "한국","대한민국","서울","부산","광주","대전","인천","대구","울산","세종",
+    "경기","강원","충북","충남","전북","전남","경북","경남","제주",
+    "korea","seoul","busan","daegu","incheon","gwangju","daejeon","ulsan","jeju",
+]
+
+def _is_domestic(ev: dict) -> bool:
+    loc = (ev.get("location") or "").lower()
+    src = (ev.get("source") or "").lower()
+    title = (ev.get("title") or "").lower()
+    blob = f"{loc} {src} {title}"
+    # .kr 도메인은 국내
+    if ".kr" in src:
+        return True
+    for kw in KR_KEYWORDS:
+        if kw.lower() in blob:
+            return True
+    return False
+
+def filter_overseas_offline(events: list[dict]) -> tuple[list[dict], list[dict]]:
+    """해외 오프라인 제외: 온라인은 유지, 국내 오프라인 유지, 해외 오프라인만 filtered."""
+    keep: list[dict] = []
+    filtered: list[dict] = []
+    for ev in events:
+        loc = (ev.get("location") or "").strip()
+        is_online = "온라인" in loc
+        # 혼합형(온라인 포함)은 유지
+        if is_online:
+            keep.append(ev)
+            continue
+        # location이 비어있으면 보수적으로 유지 (소스 기반 판단 불가 시)
+        if not loc:
+            keep.append(ev)
+            continue
+        is_domestic = _is_domestic(ev)
+        # 오프라인 + 해외 → 제외
+        if loc.startswith("오프라인") and not is_domestic:
+            filtered.append(ev)
+        else:
+            keep.append(ev)
+    logger.info(f"Overseas filter: {len(events)} -> keep {len(keep)}, filtered(해외 오프라인) {len(filtered)}")
+    return keep, filtered
+
+
 def filter_valid(events: list[dict]) -> tuple[list[dict], list[dict]]:
     """(valid, expired) 분리."""
     today = datetime.now(SEOUL).date()

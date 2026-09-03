@@ -27,6 +27,7 @@ class State(TypedDict, total=False):
     extracted_events: list[dict]
     valid_events: list[dict]
     expired_events: list[dict]
+    overseas_filtered: list[dict]
     sheets_result: dict
     calendar_result: dict
     stats: dict
@@ -83,12 +84,29 @@ def validate_node(state: State) -> dict:
         return {"valid_events": events, "expired_events": [], "errors": [f"validate: {e}"]}
 
 
+def overseas_filter_node(state: State) -> dict:
+    """해외 오프라인 제외: 온라인은 유지, 국내 오프라인 유지."""
+    from tools.validator import filter_overseas_offline
+    events = state.get("valid_events", [])
+    logger.info(f"=== overseas_filter_node start (valid={len(events)}) ===")
+    if not events:
+        return {"overseas_filtered": [], "messages": ["해외 필터: 대상 없음"]}
+    try:
+        keep, filtered = filter_overseas_offline(events)
+        msg = f"해외 필터: {len(keep)}개 유지, {len(filtered)}개 해외 오프라인 제외"
+        logger.info(msg)
+        return {"valid_events": keep, "overseas_filtered": filtered, "messages": [msg]}
+    except Exception as e:
+        logger.error(f"overseas_filter_node failed: {e}")
+        return {"overseas_filtered": [], "errors": [f"overseas_filter: {e}"]}
+
+
 def dedup_node(state: State) -> dict:
     """Sheets 기존 id 기준 dedup은 sheets_node에서 처리하므로 여기서는 패스스루 + 통계."""
     valid = state.get("valid_events", [])
     logger.info(f"=== dedup_node (valid={len(valid)}) ===")
     # 실제 dedup은 sheets에서, 여기서는 로깅만
-    return {"messages": [f"검증 통과 {len(valid)}개 — Sheets 중복 검사로 전달"]}
+    return {"messages": [f"해외 필터 통과 {len(valid)}개 — Sheets 중복 검사로 전달"]}
 
 
 def sheets_node(state: State) -> dict:
@@ -132,6 +150,7 @@ def calendar_node(state: State) -> dict:
         stats = {
             "found": len(state.get("extracted_events", [])),
             "expired": len(state.get("expired_events", [])),
+            "overseas_filtered": len(state.get("overseas_filtered", [])),
             "valid": len(events),
             "sheets_inserted": sheets_res.get("inserted", 0),
             "sheets_skipped": sheets_res.get("skipped", 0),
@@ -151,6 +170,7 @@ workflow = StateGraph(State)
 workflow.add_node("search", search_node)
 workflow.add_node("extract", extract_node)
 workflow.add_node("validate", validate_node)
+workflow.add_node("overseas_filter", overseas_filter_node)
 workflow.add_node("dedup", dedup_node)
 workflow.add_node("sheets", sheets_node)
 workflow.add_node("calendar", calendar_node)
@@ -158,7 +178,8 @@ workflow.add_node("calendar", calendar_node)
 workflow.add_edge(START, "search")
 workflow.add_edge("search", "extract")
 workflow.add_edge("extract", "validate")
-workflow.add_edge("validate", "dedup")
+workflow.add_edge("validate", "overseas_filter")
+workflow.add_edge("overseas_filter", "dedup")
 workflow.add_edge("dedup", "sheets")
 workflow.add_edge("sheets", "calendar")
 workflow.add_edge("calendar", END)
