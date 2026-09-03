@@ -11,6 +11,8 @@ tavily-python>=0.5
 python-dateutil>=2.8
 python-dotenv>=1.0
 tzdata
+langsmith>=0.2
+google-cloud-secret-manager>=2.20
 # protobuf 6.x 최신 — langgraph-api(>=6.32.1,<7)와 grpcio 1.81.x 호환
 # google-ai-generativelanguage/grpcio-status는 명세상 <6.0을 요구하나 런타임은 정상 동작 (FutureWarning 무시 가능)
 # 7.36.1은 grpcio<7 제약으로 불가, 6.33.6이 6.x 최신

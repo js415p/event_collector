@@ -14,6 +14,14 @@ try:
 except Exception:
     pass
 
+# LangSmith tracing — Cloud Secrets(.env)에서 자동 주입, 프로젝트: game event collector
+if os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY"):
+    os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
+    os.environ.setdefault("LANGCHAIN_API_KEY", os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY") or "")
+    os.environ.setdefault("LANGCHAIN_PROJECT", os.getenv("LANGSMITH_PROJECT") or os.getenv("LANGCHAIN_PROJECT") or "game event collector")
+    if os.getenv("LANGSMITH_ENDPOINT"):
+        os.environ.setdefault("LANGCHAIN_ENDPOINT", os.getenv("LANGSMITH_ENDPOINT"))
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 

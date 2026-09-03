@@ -43,6 +43,32 @@ CRON_SCHEDULE=0 0 * * 1,4 # 월/목
 - **해외 필터:** `location`에 `온라인` 포함 → 유지, `오프라인: 해외(미국/일본 등)` + 국내 키워드/`.kr` 없음 → 제외, 빈 location/혼합(오프라인+온라인)은 유지
 - **중복:** `sha1(title+start_date+url)` 해시로 Sheets A열/Calendar eventId dedup
 
+## 배포 (LangGraph Cloud)
+
+```bash
+# 1. Secrets 업로드 — .env → Secret Manager
+pip install google-cloud-secret-manager python-dotenv
+python scripts/push_secrets.py --env .env --project game-event-agent
+# 또는 dry-run: --dry-run, 또는 gcloud: bash scripts/setup_cloud_secrets.sh game-event-agent .env
+
+# 2. Cloud 배포
+npx @langchain/langgraph-cli login   # 또는 langgraph login
+langgraph build --config langgraph.json
+langgraph deploy --config langgraph.json
+# 생성된 URL: https://<deployment>.us-central1.langgraph.app
+
+# 3. Cron 등록 (Cloud에서만 동작)
+LANGGRAPH_API_URL=https://<deployment>.us-central1.langgraph.app python setup_cron.py
+# Cron: 0 0 * * 1 (월 09:00 KST) — .env CRON_SCHEDULE로 변경 가능
+```
+
+## 모니터링 (LangSmith — 프로젝트: game event collector)
+
+- `agent.py`가 `LANGSMITH_API_KEY` 존재 시 `LANGCHAIN_TRACING_V2=true`, `LANGCHAIN_PROJECT=game event collector`로 자동 추적
+- `.env`에 `LANGSMITH_API_KEY` + `LANGSMITH_PROJECT=game event collector` 설정 (Cloud에서는 Secrets로 주입)
+- 확인: https://smith.langchain.com → Projects → `game event collector` → 각 노드(search/extract/validate/overseas_filter/sheets/calendar) latency, `stats.found/expired/overseas_filtered/valid`, `errors` 추적
+- 로컬도 `pip install langsmith` 후 동일 `.env`로 트레이싱 가능
+
 ## 무료 티어
 - Gemini 3.5-flash-lite (free): ~15 RPM / 1,000 RPD — 주 1회 8쿼리 × ~10 Gemini 호출 = 1% 미만
 - Sheets: 300/min/project, 60/min/user — `events` 탭 `batchUpdate` 1회
