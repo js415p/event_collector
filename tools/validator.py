@@ -67,16 +67,40 @@ KR_KEYWORDS = [
 ]
 
 def _is_domestic(ev: dict) -> bool:
-    loc = (ev.get("location") or "").lower()
+    loc = (ev.get("location") or "").strip()
+    loc_low = loc.lower()
     src = (ev.get("source") or "").lower()
     title = (ev.get("title") or "").lower()
-    blob = f"{loc} {src} {title}"
-    # .kr 도메인은 국내
+    # 1순위: location에 국내 키워드가 있으면 국내
+    for kw in KR_KEYWORDS:
+        if kw.lower() in loc_low:
+            return True
+    # location이 오프라인인데 국내 키워드가 없으면, source/제목으로 재확인
+    if loc.startswith("오프라인"):
+        # 명백한 해외 지명이 location에 있으면 즉시 해외 (source .kr 여도 해외)
+        overseas_hints = ["미국","일본","중국","독일","프랑스","영국","캐나다","호주","스웨덴","터키","이탈리아","스페인","브라질","러시아","태국","베트남","싱가포르","멕시코","인도","호주","멜버른","시애틀","도쿄","베이징","상하이","워싱턴","캘리포니아","보스턴","온타리오","이스탄불","멜버른","오리건","스웨덴","캐나다"]
+        for oh in overseas_hints:
+            if oh in loc:
+                return False
+        blob = f"{src} {title}"
+        if ".kr" in src:
+            return True
+        for kw in KR_KEYWORDS:
+            if kw.lower() in blob:
+                return True
+        # 한글 제목은 국내 가능성 높음
+        if any('\uac00' <= ch <= '\ud7a3' for ch in ev.get("title","")):
+            return True
+        return False
+    # 온라인이거나 빈 location은 소스/제목으로 보조 판정
+    blob = f"{src} {title}"
     if ".kr" in src:
         return True
     for kw in KR_KEYWORDS:
         if kw.lower() in blob:
             return True
+    if any('\uac00' <= ch <= '\ud7a3' for ch in ev.get("title","")):
+        return True
     return False
 
 def filter_overseas_offline(events: list[dict]) -> tuple[list[dict], list[dict]]:
