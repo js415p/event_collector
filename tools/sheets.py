@@ -119,10 +119,67 @@ def ensure_sheet(sheets_service, drive_service) -> str | None:
         return None
 
 
+def _ensure_tab(sheets_service, spreadsheet_id: str) -> int:
+    """SHEET_TAB이 없으면 생성하고 헤더를 쓴다. sheetId 반환."""
+    try:
+        meta = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+        for s in meta.get("sheets", []):
+            if s["properties"]["title"] == SHEET_TAB:
+                # 헤더가 비었으면 채움
+                try:
+                    hdr = sheets_service.spreadsheets().values().get(
+                        spreadsheetId=spreadsheet_id, range=f"'{SHEET_TAB}'!A1:M1"
+                    ).execute()
+                    if not hdr.get("values"):
+                        sheets_service.spreadsheets().values().update(
+                            spreadsheetId=spreadsheet_id,
+                            range=f"'{SHEET_TAB}'!A1:M1",
+                            valueInputOption="RAW",
+                            body={"values": [HEADERS]},
+                        ).execute()
+                except Exception:
+                    pass
+                return s["properties"]["sheetId"]
+        # 없으면 생성
+        logger.info(f"Tab '{SHEET_TAB}' not found — creating")
+        resp = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{"addSheet": {"properties": {"title": SHEET_TAB, "gridProperties": {"frozenRowCount": 1}}}}]},
+        ).execute()
+        new_sheet_id = resp["replies"][0]["addSheet"]["properties"]["sheetId"]
+        # 헤더
+        sheets_service.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id,
+            range=f"'{SHEET_TAB}'!A1:M1",
+            valueInputOption="RAW",
+            body={"values": [HEADERS]},
+        ).execute()
+        try:
+            sheets_service.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={"requests": [
+                    {"repeatCell": {"range": {"sheetId": new_sheet_id, "startRowIndex": 0, "endRowIndex": 1},
+                                    "cell": {"userEnteredFormat": {"backgroundColor": {"red": 0.2, "green": 0.4, "blue": 0.8},
+                                                                   "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}}}},
+                                    "fields": "userEnteredFormat(backgroundColor,textFormat)"}},
+                    {"setBasicFilter": {"filter": {"range": {"sheetId": new_sheet_id, "startRowIndex": 0}}}},
+                    {"autoResizeDimensions": {"dimensions": {"sheetId": new_sheet_id, "dimension": "COLUMNS", "startIndex": 0, "endIndex": 13}}},
+                ]},
+            ).execute()
+        except Exception as e:
+            logger.warning(f"Tab formatting failed: {e}")
+        return new_sheet_id
+    except Exception as e:
+        logger.warning(f"Ensure tab failed: {e}")
+        return 0
+
+
 def _load_existing_ids(sheets_service, spreadsheet_id: str) -> set[str]:
+    # 탭 보장 후 로드
+    _ensure_tab(sheets_service, spreadsheet_id)
     try:
         resp = sheets_service.spreadsheets().values().get(
-            spreadsheetId=spreadsheet_id, range=f"{SHEET_TAB}!A2:A"
+            spreadsheetId=spreadsheet_id, range=f"'{SHEET_TAB}'!A2:A"
         ).execute()
         values = resp.get("values", [])
         return {row[0] for row in values if row and row[0]}
@@ -171,7 +228,8 @@ def write_events(events: list[dict]) -> dict:
         logger.info(f"Sheets: all {len(events)} events already exist — nothing to append")
         return {"inserted": 0, "skipped": skipped, "sheet_id": spreadsheet_id}
 
-    # batch append (60/min 제한 대응: 한 번에)
+    # batch append (60/min 제한 대응: 한 번에) — 탭 보장 후
+    _ensure_tab(sheets_svc, spreadsheet_id)
     try:
         # exponential backoff for 429
         import time, random
@@ -179,7 +237,7 @@ def write_events(events: list[dict]) -> dict:
             try:
                 sheets_svc.spreadsheets().values().append(
                     spreadsheetId=spreadsheet_id,
-                    range=f"{SHEET_TAB}!A:M",
+                    range=f"'{SHEET_TAB}'!A:M",
                     valueInputOption="RAW",
                     insertDataOption="INSERT_ROWS",
                     body={"values": rows_to_append},
