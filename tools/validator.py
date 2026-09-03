@@ -39,15 +39,54 @@ def _has_2025(event: dict) -> bool:
         d = _parse_date(event.get(key))
         if d and d.year == 2025:
             return True
-        # 문자열에 2025가 그대로 있으면 (파싱 실패해도) 의심
         val = event.get(key)
         if isinstance(val, str) and "2025" in val:
             return True
-    # 제목에 2025가 있고 2026이 없으면 2025 행사로 간주 (예: "2025 게임잼")
     title = event.get("title") or ""
+    desc = event.get("description") or ""
+    # 제목/설명에 2025가 있고 2026이 없으면 2025 행사로 간주
     if "2025" in title and "2026" not in title:
         return True
+    if "2025" in desc and "2026" not in desc and "2025" in title:
+        return True
+    # 설명/URL에 2025 흔적이 있으면 의심 — 외부 검증은 is_expired에서 별도 수행
     return False
+
+def _has_2025_external(event: dict) -> bool:
+    """날짜가 없는 경우 Tavily로 외부 검증: 2025 언급이 2026보다 많으면 2025로 간주."""
+    # 날짜가 하나라도 있으면 외부 검증 스킵 (이미 _has_2025로 잡힘)
+    for key in ("start_date", "end_date", "deadline", "application_start", "application_end"):
+        if event.get(key):
+            return False
+    title = (event.get("title") or "").strip()
+    if not title or "2026" in title:
+        return False  # 2026이 제목에 있으면 2026으로 간주
+    # 캐시
+    cache = getattr(_has_2025_external, "_cache", {})
+    if title in cache:
+        return cache[title]
+    try:
+        import os
+        from tavily import TavilyClient
+        api_key = os.getenv("TAVILY_API_KEY")
+        if not api_key:
+            return False
+        client = TavilyClient(api_key=api_key)
+        res = client.search(title, max_results=3, include_answer=False)
+        text = ""
+        for r in res.get("results", [])[:2]:
+            text += " " + (r.get("content") or "") + " " + (r.get("title") or "")
+        cnt2025 = text.count("2025")
+        cnt2026 = text.count("2026")
+        is2025 = cnt2025 > 0 and cnt2025 > cnt2026
+        cache[title] = is2025
+        _has_2025_external._cache = cache
+        if is2025:
+            logger.info(f"External 2025 detected for '{title}': 2025={cnt2025}, 2026={cnt2026}")
+        return is2025
+    except Exception as e:
+        logger.debug(f"External 2025 check failed for '{title}': {e}")
+        return False
 
 def is_expired(event: dict, today: date | None = None) -> bool:
     """True면 마감/종료로 제외해야 함."""
@@ -56,6 +95,9 @@ def is_expired(event: dict, today: date | None = None) -> bool:
 
     # 0) 2025년 행사는 무조건 제외 (강화)
     if _has_2025(event):
+        return True
+    # 0-1) 날짜 없는 경우 외부 검증 (Tavily)
+    if _has_2025_external(event):
         return True
 
     # 1) Gemini status가 closed/cancelled면 즉시 제외
