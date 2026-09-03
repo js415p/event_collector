@@ -9,9 +9,9 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# 모델 설정: 2.0은 2026-06-01 deprecated이므로 기본 2.5-flash-lite
-DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
-FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-flash")
+# 모델 설정: 2.5는 신규 사용자 미제공(404) → 3.5-flash-lite가 안정 (2026-09 검증)
+DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-flash-lite-latest")
 MIN_INTERVAL_SEC = float(os.getenv("GEMINI_MIN_INTERVAL_SEC", "4.0"))
 MAX_RETRIES = int(os.getenv("GEMINI_MAX_RETRIES", "5"))
 
