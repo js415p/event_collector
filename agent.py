@@ -36,8 +36,15 @@ class State(TypedDict, total=False):
     valid_events: list[dict]
     expired_events: list[dict]
     overseas_filtered: list[dict]
-    capped_events: list[dict]
     capped_skipped: list[dict]
+    # 채팅 모드: 5건 제시 + 선택 저장, 기록 미저장(스레드 미유지)
+    mode: str  # "weekly" | "chat"
+    chat_query: str
+    chat_limit: int  # 제시 개수, 기본 5
+    chat_presented: list[dict]  # 5건 제시용
+    chat_selected_ids: list[str]  # 사용자가 고른 id 목록 (hash)
+    chat_selected_events: list[dict]  # 선택된 이벤트 (저장 대상)
+    save: bool  # 채팅에서 저장 여부 — present 단계에서는 False, 선택 후 True
     sheets_result: dict
     calendar_result: dict
     stats: dict
@@ -47,11 +54,43 @@ class State(TypedDict, total=False):
 # ── Nodes ──
 
 def search_node(state: State) -> dict:
-    """Tavily 8쿼리 검색 (KO+EN)."""
+    """주간: 16쿼리 / 채팅: 질문 기반 2~3쿼리 확장."""
     from tools.search import search_all
-    logger.info("=== search_node start ===")
+    mode = state.get("mode", "weekly")
+    logger.info(f"=== search_node start (mode={mode}) ===")
     try:
-        results = search_all()
+        if mode == "chat":
+            query = state.get("chat_query") or (state.get("messages") or [""])[-1]
+            # 질문 → Tavily 쿼리 2~3개로 확장 (Gemini, 4초 throttling)
+            expanded = None
+            try:
+                from tools.gemini import generate_text
+                prompt = (
+                    f'사용자 질문: \"{query}\"\n'
+                    '이를 Tavily 검색용 2~3개 쿼리로 변환하라. 충북대/연합동아리/국가/지자체가 언급되면 해당 기관명을 포함하고, '
+                    '한국어 1~2개 + 영어 1개로 구성하라. 출력은 JSON 배열만: ["query1","query2"]'
+                )
+                raw = generate_text(prompt).strip()
+                # JSON 배열 파싱 (코드펜스 제거)
+                import json as _json
+                if raw.startswith("```"):
+                    raw = raw.split("\n", 1)[-1]
+                    if raw.endswith("```"):
+                        raw = raw[:-3]
+                    raw = raw.strip()
+                expanded = _json.loads(raw)
+                if isinstance(expanded, str):
+                    expanded = [expanded]
+                expanded = [q for q in expanded if isinstance(q, str) and q.strip()][:3]
+                if not expanded:
+                    expanded = None
+            except Exception as e:
+                logger.warning(f"chat query expand failed: {e}")
+            queries = expanded if expanded else [query]
+            logger.info(f"chat expanded queries: {queries}")
+            results = search_all(queries)
+        else:
+            results = search_all()
         msg = f"검색 완료: {len(results)}개 결과"
         logger.info(msg)
         return {"raw_search_results": results, "messages": [msg]}
@@ -112,17 +151,17 @@ def overseas_filter_node(state: State) -> dict:
 
 
 def cap_node(state: State) -> dict:
-    """신규 추가 20건 캡 — Sheets dedup 전, 우선순위 정렬 후 상위 20건만 유지. 다음 주부터 적용, 모든 미래 유지."""
+    """주간: 신규 20건 캡 / 채팅: cap off (요청한 5건 그대로)."""
+    mode = state.get("mode", "weekly")
+    if mode == "chat":
+        logger.info("=== cap_node skipped (chat mode: cap off) ===")
+        return {"messages": ["캡: 채팅 모드에서는 비활성화 (모든 미래 유지)"]}
     from tools.validator import cap_events
     events = state.get("valid_events", [])
-    # dedup은 sheets에서 하므로 여기서는 valid 전체를 대상으로 캡, sheets에서 중복 제외 시 실제 신규는 20 이하
-    # 옵션: sheets 중복을 미리 고려하려면 sheets existing ids를 여기서 로드해야 하나, 단순화를 위해 valid 기준 캡
     logger.info(f"=== cap_node start (valid={len(events)}) ===")
     if not events:
         return {"capped_skipped": [], "messages": ["캡: 대상 없음"]}
-    # 중복을 고려한 신규 20건 캡: sheets 기존 ids를 미리 로드해 신규만 카운트
     try:
-        # 기존 시트 ids 로드 (실패 시 valid 기준 캡으로 폴백)
         from tools.sheets import _get_services, _load_existing_ids
         import os, hashlib
         sheets_svc, _ = _get_services()
@@ -133,14 +172,12 @@ def cap_node(state: State) -> dict:
                 existing = _load_existing_ids(sheets_svc, sid)
             except Exception as e:
                 logger.warning(f"cap: load existing ids failed {e}")
-        # 신규만 추출
         def hid(ev):
             raw = f"{(ev.get('title','').strip().lower())}|{(ev.get('start_date','') or '').strip()}|{(ev.get('url','').strip().lower())}"
             return hashlib.sha1(raw.encode()).hexdigest()[:16]
         new_events = [e for e in events if hid(e) not in existing]
         already_skipped = [e for e in events if hid(e) in existing]
         keep, capped = cap_events(new_events)
-        # keep + already_skipped(중복)은 sheets에서 스킵되므로 valid_events는 keep만 전달
         msg = f"캡: 신규 {len(new_events)}개 중 {len(keep)}개 유지(주간 20건), {len(capped)}개 초과 제외, 기존 중복 {len(already_skipped)}개"
         logger.info(msg)
         return {"valid_events": keep, "capped_skipped": capped, "messages": [msg]}
@@ -151,19 +188,93 @@ def cap_node(state: State) -> dict:
         return {"valid_events": keep, "capped_skipped": capped, "messages": [msg]}
 
 
+def present_node(state: State) -> dict:
+    """채팅 모드: 5건 제시 (우선순위 정렬 후 chat_presented에 저장, 기록 미저장 — stateless)."""
+    mode = state.get("mode", "weekly")
+    if mode != "chat":
+        return {}
+    events = state.get("valid_events", [])
+    limit = int(state.get("chat_limit") or 5)
+    logger.info(f"=== present_node (chat, valid={len(events)}, limit={limit}) ===")
+    if not events:
+        return {"chat_presented": [], "messages": ["제시할 행사가 없습니다."]}
+    # 이미 cap이 꺼져 있으므로 여기서 정렬 후 5건 제시 (충북대/연합 가점 반영)
+    try:
+        from tools.validator import _parse_date, _boost_score
+        from datetime import date as _date
+        def sort_key(ev):
+            d = _parse_date(ev.get("start_date"))
+            return (d or _date.max, -_boost_score(ev))
+        ranked = sorted(events, key=sort_key)
+        presented = ranked[:limit]
+        # id 부여 (sheets와 동일 hash)
+        import hashlib
+        for ev in presented:
+            raw = f"{(ev.get('title','').strip().lower())}|{(ev.get('start_date','') or '').strip()}|{(ev.get('url','').strip().lower())}"
+            ev["id"] = hashlib.sha1(raw.encode()).hexdigest()[:16]
+        msg = f"{len(presented)}건을 찾았습니다. 추가할 항목을 선택하세요."
+        logger.info(msg)
+        return {"chat_presented": presented, "messages": [msg]}
+    except Exception as e:
+        logger.error(f"present_node failed: {e}")
+        return {"chat_presented": events[:limit], "messages": [f"제시 실패: {e}"]}
+
+
 def dedup_node(state: State) -> dict:
     """Sheets 기존 id 기준 dedup은 sheets_node에서 처리하므로 여기서는 패스스루 + 통계."""
+    mode = state.get("mode", "weekly")
     valid = state.get("valid_events", [])
-    logger.info(f"=== dedup_node (valid={len(valid)}) ===")
-    # 실제 dedup은 sheets에서, 여기서는 로깅만
+    logger.info(f"=== dedup_node (valid={len(valid)}, mode={mode}) ===")
     return {"messages": [f"캡 통과 {len(valid)}개 — Sheets 중복 검사로 전달"]}
 
 
+def chat_save_node(state: State) -> dict:
+    """채팅 2단계: 사용자가 고른 5개 중 선택한 것만 valid_events로 설정 (저장 전)."""
+    selected_ids = state.get("chat_selected_ids")
+    if selected_ids is None:
+        return {}
+    if len(selected_ids) == 0:
+        logger.info("chat_save: no selection")
+        return {"valid_events": [], "messages": ["선택된 항목 없음 — 저장 스킵"]}
+    pool = state.get("chat_presented") or state.get("valid_events", []) or state.get("chat_selected_events") or []
+    # pool이 없으면 chat_selected_events 직접 사용
+    if not pool and state.get("chat_selected_events"):
+        pool = state.get("chat_selected_events")
+    id_set = set(selected_ids)
+    # id가 없으면 title로도 매칭 (폴백)
+    selected = [ev for ev in pool if ev.get("id") in id_set]
+    if not selected and pool:
+        # title 매칭 폴백
+        selected = [ev for ev in pool if ev.get("title") in id_set]
+    logger.info(f"chat_save: selected {len(selected)}/{len(pool)} (ids={selected_ids})")
+    return {"valid_events": selected, "chat_selected_events": selected, "messages": [f"{len(selected)}개 선택 — 저장 진행"]}
+
+
+def _resolve_save_events(state: State) -> list[dict]:
+    """채팅에서 사용자가 고른 것만 저장: chat_selected_ids → valid_events 필터."""
+    mode = state.get("mode", "weekly")
+    if mode != "chat":
+        return state.get("valid_events", [])
+    selected_ids = state.get("chat_selected_ids")
+    if selected_ids is not None:
+        # chat_save_node에서 이미 valid_events를 필터링했으므로 그대로 반환
+        return state.get("valid_events", [])
+    # selected_ids가 None이면 아직 선택 전 (present만) — 저장 스킵을 위해 _resolve에서는 빈 목록 대신 present 감지
+    if state.get("chat_presented") is not None:
+        return []
+    return state.get("valid_events", [])
+
+
 def sheets_node(state: State) -> dict:
-    """Google Sheets 저장."""
+    """Google Sheets 저장 — 채팅 모드에서 선택한 것만, 기록 미저장(stateless)."""
     from tools.sheets import write_events
-    events = state.get("valid_events", [])
-    logger.info(f"=== sheets_node start (valid={len(events)}) ===")
+    mode = state.get("mode", "weekly")
+    # 채팅 present 단계(선택 전)에서는 저장 스킵
+    if mode == "chat" and state.get("chat_selected_ids") is None and state.get("chat_presented") is not None:
+        logger.info("=== sheets_node skipped (chat present phase) ===")
+        return {"sheets_result": {"inserted": 0, "skipped": 0}, "messages": ["저장 대기: 선택 후 저장됩니다."]}
+    events = _resolve_save_events(state)
+    logger.info(f"=== sheets_node start (valid={len(events)}, mode={mode}) ===")
     if not events:
         return {"sheets_result": {"inserted": 0, "skipped": 0}, "messages": ["저장할 유효 행사 없음"]}
     try:
@@ -181,11 +292,15 @@ def sheets_node(state: State) -> dict:
 
 
 def calendar_node(state: State) -> dict:
-    """Google Calendar 저장 — Sheets에 신규 삽입된 것만? 현재는 valid 전체를 dedup."""
+    """Google Calendar 저장 — 채팅 선택 분기 포함."""
     from tools.calendar import write_events
-    events = state.get("valid_events", [])
+    mode = state.get("mode", "weekly")
+    if mode == "chat" and state.get("chat_selected_ids") is None and state.get("chat_presented") is not None:
+        logger.info("=== calendar_node skipped (chat present phase) ===")
+        return {"calendar_result": {"inserted": 0}, "messages": ["Calendar: 선택 후 저장됩니다."]}
+    events = _resolve_save_events(state)
     sheets_res = state.get("sheets_result", {})
-    logger.info(f"=== calendar_node start (valid={len(events)}) ===")
+    logger.info(f"=== calendar_node start (valid={len(events)}, mode={mode}) ===")
     if not events:
         return {"calendar_result": {"inserted": 0}, "messages": ["Calendar: 저장할 행사 없음"]}
     # Sheets에서 스킵된 것은 Calendar도 스킵될 확률 높지만, Calendar dedup이 별도이므로 전체 전달
@@ -223,18 +338,31 @@ workflow.add_node("extract", extract_node)
 workflow.add_node("validate", validate_node)
 workflow.add_node("overseas_filter", overseas_filter_node)
 workflow.add_node("cap", cap_node)
+workflow.add_node("present", present_node)
+workflow.add_node("chat_save", chat_save_node)
 workflow.add_node("dedup", dedup_node)
 workflow.add_node("sheets", sheets_node)
 workflow.add_node("calendar", calendar_node)
 
-workflow.add_edge(START, "search")
+def _route_start(state: State):
+    # 채팅 2단계: 이미 선택한 ids가 있으면 검색을 건너뛰고 바로 저장
+    if state.get("mode") == "chat" and state.get("chat_selected_ids") is not None:
+        return "chat_save"
+    return "search"
+
+workflow.add_conditional_edges(START, _route_start, {"search": "search", "chat_save": "chat_save"})
 workflow.add_edge("search", "extract")
 workflow.add_edge("extract", "validate")
 workflow.add_edge("validate", "overseas_filter")
 workflow.add_edge("overseas_filter", "cap")
-workflow.add_edge("cap", "dedup")
+workflow.add_edge("cap", "present")
+workflow.add_edge("present", "dedup")
 workflow.add_edge("dedup", "sheets")
 workflow.add_edge("sheets", "calendar")
 workflow.add_edge("calendar", END)
+workflow.add_edge("chat_save", "dedup")
 
 graph = workflow.compile()
+
+# 채팅 기록 미저장: 매 호출은 새 스레드로 stateless 실행 (checkpointer 미사용)
+# weekly: Cron stateless, chat: 매 호출 새 thread_id로 호출해야 기록이 남지 않음
