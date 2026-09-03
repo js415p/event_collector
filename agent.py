@@ -266,17 +266,40 @@ def _resolve_save_events(state: State) -> list[dict]:
 
 
 def sheets_node(state: State) -> dict:
-    """Google Sheets 저장 — 채팅 모드에서 선택한 것만, 기록 미저장(stateless)."""
+    """Google Sheets 저장 — 주간/채팅 모두 시트에만 저장, 캘린더는 수동. 기록 미저장(stateless)."""
     from tools.sheets import write_events
     mode = state.get("mode", "weekly")
     # 채팅 present 단계(선택 전)에서는 저장 스킵
     if mode == "chat" and state.get("chat_selected_ids") is None and state.get("chat_presented") is not None:
         logger.info("=== sheets_node skipped (chat present phase) ===")
-        return {"sheets_result": {"inserted": 0, "skipped": 0}, "messages": ["저장 대기: 선택 후 저장됩니다."]}
+        # 통계는 present 단계에서도 반환 (캘린더 없이)
+        stats = {
+            "found": len(state.get("extracted_events", [])),
+            "expired": len(state.get("expired_events", [])),
+            "overseas_filtered": len(state.get("overseas_filtered", [])),
+            "capped_skipped": len(state.get("capped_skipped", [])),
+            "valid": len(state.get("valid_events", []) or state.get("chat_presented", [])),
+            "sheets_inserted": 0,
+            "sheets_skipped": 0,
+            "timestamp": datetime.now(SEOUL).isoformat(),
+            "mode": mode,
+        }
+        return {"sheets_result": {"inserted": 0, "skipped": 0}, "stats": stats, "messages": ["저장 대기: 선택 후 저장됩니다.", f"통계: {stats}"]}
     events = _resolve_save_events(state)
     logger.info(f"=== sheets_node start (valid={len(events)}, mode={mode}) ===")
     if not events:
-        return {"sheets_result": {"inserted": 0, "skipped": 0}, "messages": ["저장할 유효 행사 없음"]}
+        stats = {
+            "found": len(state.get("extracted_events", [])),
+            "expired": len(state.get("expired_events", [])),
+            "overseas_filtered": len(state.get("overseas_filtered", [])),
+            "capped_skipped": len(state.get("capped_skipped", [])),
+            "valid": 0,
+            "sheets_inserted": 0,
+            "sheets_skipped": 0,
+            "timestamp": datetime.now(SEOUL).isoformat(),
+            "mode": mode,
+        }
+        return {"sheets_result": {"inserted": 0, "skipped": 0}, "stats": stats, "messages": ["저장할 유효 행사 없음", f"통계: {stats}"]}
     try:
         result = write_events(events)
         msg = f"Sheets: {result.get('inserted',0)}개 추가, {result.get('skipped',0)}개 중복 스킵"
@@ -285,7 +308,18 @@ def sheets_node(state: State) -> dict:
         if result.get("sheet_id"):
             msg += f" sheet={result['sheet_id']}"
         logger.info(msg)
-        return {"sheets_result": result, "messages": [msg]}
+        stats = {
+            "found": len(state.get("extracted_events", [])),
+            "expired": len(state.get("expired_events", [])),
+            "overseas_filtered": len(state.get("overseas_filtered", [])),
+            "capped_skipped": len(state.get("capped_skipped", [])),
+            "valid": len(events),
+            "sheets_inserted": result.get("inserted", 0),
+            "sheets_skipped": result.get("skipped", 0),
+            "timestamp": datetime.now(SEOUL).isoformat(),
+            "mode": mode,
+        }
+        return {"sheets_result": result, "stats": stats, "messages": [msg, f"통계: {stats}"]}
     except Exception as e:
         logger.error(f"sheets_node failed: {e}")
         return {"sheets_result": {"inserted": 0, "error": str(e)}, "errors": [f"sheets: {e}"]}
@@ -330,7 +364,55 @@ def calendar_node(state: State) -> dict:
         return {"calendar_result": {"inserted": 0, "error": str(e)}, "errors": [f"calendar: {e}"]}
 
 
-# ── Graph ──
+# ── Calendar helper — 시트에서 고른 것만 수동 추가 (UI에서 호출) ──
+def add_sheet_rows_to_calendar(selected_ids: list[str] | None = None, selected_titles: list[str] | None = None) -> dict:
+    """
+    시트(events 탭)에서 사용자가 체크한 행만 캘린더에 추가.
+    - selected_ids: 시트 id 컬럼 값 목록 (hash) — 권장
+    - selected_titles: 제목 목록 (폴백, id가 없을 때)
+    UI는 시트 id를 그대로 전달하면 됨.
+    """
+    from tools.sheets import _get_services
+    from tools.calendar import write_events as cal_write
+
+    sheets_svc, _ = _get_services()
+    if sheets_svc is None:
+        return {"inserted": 0, "error": "no_credentials"}
+
+    import os
+    sid = os.getenv("SHEET_ID")
+    tab = os.getenv("SHEET_TAB", "events")
+    # 시트 전체 읽기
+    vals = sheets_svc.spreadsheets().values().get(spreadsheetId=sid, range=f"'{tab}'!A1:O").execute()
+    rows = vals.get("values", [])
+    if not rows:
+        return {"inserted": 0, "error": "empty sheet"}
+    header = rows[0]
+    cols = {h: i for i, h in enumerate(header)}
+    id_idx = cols.get("id")
+    title_idx = cols.get("title")
+
+    id_set = set(selected_ids or [])
+    title_set = set(selected_titles or [])
+
+    to_add = []
+    for r in rows[1:]:
+        r = r + [""] * (len(header) - len(r))
+        row_id = r[id_idx] if id_idx is not None and id_idx < len(r) else ""
+        row_title = r[title_idx] if title_idx is not None else ""
+        if (id_set and row_id in id_set) or (title_set and row_title in title_set):
+            ev = {h: (r[cols[h]] if h in cols and cols[h] < len(r) else "") for h in header}
+            to_add.append(ev)
+
+    if not to_add:
+        return {"inserted": 0, "skipped": 0, "error": "no matching rows", "selected": len(id_set or title_set)}
+
+    # 캘린더에 2개 이벤트(접수/본행사)로 추가 — tools/calendar.write_events가 처리
+    result = cal_write(to_add)
+    return result
+
+
+# ── Graph — 시트에만 자동 추가, 캘린더는 수동(위 함수) ──
 workflow = StateGraph(State)
 
 workflow.add_node("search", search_node)
@@ -342,10 +424,11 @@ workflow.add_node("present", present_node)
 workflow.add_node("chat_save", chat_save_node)
 workflow.add_node("dedup", dedup_node)
 workflow.add_node("sheets", sheets_node)
+# calendar는 주간 자동 파이프라인에서 제외 — 수동 add_sheet_rows_to_calendar로만 추가
 workflow.add_node("calendar", calendar_node)
 
 def _route_start(state: State):
-    # 채팅 2단계: 이미 선택한 ids가 있으면 검색을 건너뛰고 바로 저장
+    # 채팅 2단계: 이미 선택한 ids가 있으면 검색을 건너뛰고 바로 저장 (시트에만)
     if state.get("mode") == "chat" and state.get("chat_selected_ids") is not None:
         return "chat_save"
     return "search"
@@ -358,11 +441,11 @@ workflow.add_edge("overseas_filter", "cap")
 workflow.add_edge("cap", "present")
 workflow.add_edge("present", "dedup")
 workflow.add_edge("dedup", "sheets")
-workflow.add_edge("sheets", "calendar")
-workflow.add_edge("calendar", END)
+workflow.add_edge("sheets", END)
+# chat_save -> dedup -> sheets (캘린더로 가지 않음)
 workflow.add_edge("chat_save", "dedup")
+# calendar 노드는 그래프에서 분리 — 필요 시 수동 호출: add_sheet_rows_to_calendar([...])
 
 graph = workflow.compile()
 
 # 채팅 기록 미저장: 매 호출은 새 스레드로 stateless 실행 (checkpointer 미사용)
-# weekly: Cron stateless, chat: 매 호출 새 thread_id로 호출해야 기록이 남지 않음
