@@ -6,16 +6,29 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# 8개 쿼리: KO 4 + EN 4 (한국+글로벌, 4종 동일 비중 + 자율 확장)
+# 16개 쿼리: KO 10 + EN 6 (충북대 한정 + 연합동아리 전국 + 국가/지자체 + 글로벌)
 DEFAULT_QUERIES = [
+    # 기존 4
     "한국 게임잼 2026 참가 모집",
     "게임 공모전 2026 대학생",
     "한국 게임 컨퍼런스 2026 일정",
     "게임 개발 대회 2026",
+    # 신규: 충북대 한정 (2)
+    "충북대학교 게임잼 공모전 2026",
+    "충북대 CBNU 게임 개발 대회 2026",
+    # 신규: 연합동아리 전국 (1)
+    "전국 연합동아리 게임잼 해커톤 2026",
+    # 신규: 국가/지자체 (3)
+    "문화체육관광부 한국콘텐츠진흥원 게임 공모전 2026",
+    "지자체 게임 공모전 2026 서울 부산 경기",
+    "대학생 게임 개발 대회 2026 위비티 콘테스트코리아",
+    # EN 6
     "game jam 2026 submissions open",
-    "indie game competition 2026",
+    "indie game competition 2026 university",
     "game conference 2026 schedule",
     "hackathon game dev 2026",
+    "university game jam contest 2026 Korea",
+    "government indie game contest 2026",
 ]
 
 # Tavily 무료: 1,000회/월

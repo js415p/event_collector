@@ -36,6 +36,8 @@ class State(TypedDict, total=False):
     valid_events: list[dict]
     expired_events: list[dict]
     overseas_filtered: list[dict]
+    capped_events: list[dict]
+    capped_skipped: list[dict]
     sheets_result: dict
     calendar_result: dict
     stats: dict
@@ -109,12 +111,52 @@ def overseas_filter_node(state: State) -> dict:
         return {"overseas_filtered": [], "errors": [f"overseas_filter: {e}"]}
 
 
+def cap_node(state: State) -> dict:
+    """신규 추가 20건 캡 — Sheets dedup 전, 우선순위 정렬 후 상위 20건만 유지. 다음 주부터 적용, 모든 미래 유지."""
+    from tools.validator import cap_events
+    events = state.get("valid_events", [])
+    # dedup은 sheets에서 하므로 여기서는 valid 전체를 대상으로 캡, sheets에서 중복 제외 시 실제 신규는 20 이하
+    # 옵션: sheets 중복을 미리 고려하려면 sheets existing ids를 여기서 로드해야 하나, 단순화를 위해 valid 기준 캡
+    logger.info(f"=== cap_node start (valid={len(events)}) ===")
+    if not events:
+        return {"capped_skipped": [], "messages": ["캡: 대상 없음"]}
+    # 중복을 고려한 신규 20건 캡: sheets 기존 ids를 미리 로드해 신규만 카운트
+    try:
+        # 기존 시트 ids 로드 (실패 시 valid 기준 캡으로 폴백)
+        from tools.sheets import _get_services, _load_existing_ids
+        import os, hashlib
+        sheets_svc, _ = _get_services()
+        sid = os.getenv("SHEET_ID")
+        existing = set()
+        if sheets_svc and sid:
+            try:
+                existing = _load_existing_ids(sheets_svc, sid)
+            except Exception as e:
+                logger.warning(f"cap: load existing ids failed {e}")
+        # 신규만 추출
+        def hid(ev):
+            raw = f"{(ev.get('title','').strip().lower())}|{(ev.get('start_date','') or '').strip()}|{(ev.get('url','').strip().lower())}"
+            return hashlib.sha1(raw.encode()).hexdigest()[:16]
+        new_events = [e for e in events if hid(e) not in existing]
+        already_skipped = [e for e in events if hid(e) in existing]
+        keep, capped = cap_events(new_events)
+        # keep + already_skipped(중복)은 sheets에서 스킵되므로 valid_events는 keep만 전달
+        msg = f"캡: 신규 {len(new_events)}개 중 {len(keep)}개 유지(주간 20건), {len(capped)}개 초과 제외, 기존 중복 {len(already_skipped)}개"
+        logger.info(msg)
+        return {"valid_events": keep, "capped_skipped": capped, "messages": [msg]}
+    except Exception as e:
+        logger.error(f"cap_node fallback: {e}")
+        keep, capped = cap_events(events)
+        msg = f"캡(폴백): {len(keep)}개 유지, {len(capped)}개 제외"
+        return {"valid_events": keep, "capped_skipped": capped, "messages": [msg]}
+
+
 def dedup_node(state: State) -> dict:
     """Sheets 기존 id 기준 dedup은 sheets_node에서 처리하므로 여기서는 패스스루 + 통계."""
     valid = state.get("valid_events", [])
     logger.info(f"=== dedup_node (valid={len(valid)}) ===")
     # 실제 dedup은 sheets에서, 여기서는 로깅만
-    return {"messages": [f"해외 필터 통과 {len(valid)}개 — Sheets 중복 검사로 전달"]}
+    return {"messages": [f"캡 통과 {len(valid)}개 — Sheets 중복 검사로 전달"]}
 
 
 def sheets_node(state: State) -> dict:
@@ -159,6 +201,7 @@ def calendar_node(state: State) -> dict:
             "found": len(state.get("extracted_events", [])),
             "expired": len(state.get("expired_events", [])),
             "overseas_filtered": len(state.get("overseas_filtered", [])),
+            "capped_skipped": len(state.get("capped_skipped", [])),
             "valid": len(events),
             "sheets_inserted": sheets_res.get("inserted", 0),
             "sheets_skipped": sheets_res.get("skipped", 0),
@@ -179,6 +222,7 @@ workflow.add_node("search", search_node)
 workflow.add_node("extract", extract_node)
 workflow.add_node("validate", validate_node)
 workflow.add_node("overseas_filter", overseas_filter_node)
+workflow.add_node("cap", cap_node)
 workflow.add_node("dedup", dedup_node)
 workflow.add_node("sheets", sheets_node)
 workflow.add_node("calendar", calendar_node)
@@ -187,7 +231,8 @@ workflow.add_edge(START, "search")
 workflow.add_edge("search", "extract")
 workflow.add_edge("extract", "validate")
 workflow.add_edge("validate", "overseas_filter")
-workflow.add_edge("overseas_filter", "dedup")
+workflow.add_edge("overseas_filter", "cap")
+workflow.add_edge("cap", "dedup")
 workflow.add_edge("dedup", "sheets")
 workflow.add_edge("sheets", "calendar")
 workflow.add_edge("calendar", END)

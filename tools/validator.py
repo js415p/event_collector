@@ -104,6 +104,44 @@ def filter_overseas_offline(events: list[dict]) -> tuple[list[dict], list[dict]]
     return keep, filtered
 
 
+def _category_weight(ev: dict) -> float:
+    cat = (ev.get("category") or "").lower()
+    weights = {"jam": 1.0, "contest": 1.0, "competition": 0.9, "hackathon": 0.9, "conference": 0.8, "showcase": 0.8, "demo_day": 0.8, "other": 0.7}
+    return weights.get(cat, 0.7)
+
+def _boost_score(ev: dict) -> float:
+    """충북대/연합동아리 가점 + relevance + category."""
+    base = float(ev.get("relevance_score") or 0.5)
+    blob = f"{ev.get('title','')} {ev.get('source','')} {ev.get('description','')}".lower()
+    # 충북대 한정 가점
+    if any(k in blob for k in ["충북대", "충북대학교", "cbnu", "chungbuk"]):
+        base += 0.15
+    # 연합동아리 전국 가점
+    if "연합동아리" in blob or "연합 동아리" in blob:
+        base += 0.15
+    # 지자체/국가 가점 (약)
+    if any(k in blob for k in ["한국콘텐츠진흥원", "콘진원", "문화체육관광부", "지자체"]):
+        base += 0.05
+    base += _category_weight(ev) * 0.1
+    return min(base, 1.5)
+
+def cap_events(events: list[dict], limit: int | None = None) -> tuple[list[dict], list[dict]]:
+    """우선순위 정렬 후 limit(신규 추가 20건) 캡. 초과는 capped_skipped."""
+    import os
+    if limit is None:
+        limit = int(os.getenv("WEEKLY_CAP", "20"))
+    # 모든 미래 유지 + 정렬: start_date 가까운 순 → boost 높은 순
+    def sort_key(ev):
+        d = _parse_date(ev.get("start_date"))
+        # None은 맨 뒤
+        date_key = d or date.max
+        return (date_key, -_boost_score(ev))
+    ranked = sorted(events, key=sort_key)
+    keep, skipped = ranked[:limit], ranked[limit:]
+    logger.info(f"Cap: {len(events)} -> keep {len(keep)} (cap {limit}), skipped {len(skipped)}")
+    return keep, skipped
+
+
 def filter_valid(events: list[dict]) -> tuple[list[dict], list[dict]]:
     """(valid, expired) 분리."""
     today = datetime.now(SEOUL).date()
