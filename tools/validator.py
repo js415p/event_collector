@@ -105,27 +105,18 @@ def is_expired(event: dict, today: date | None = None) -> bool:
     if status in ("closed", "cancelled", "expired"):
         return True
 
-    # 2) 접수기간/마감일/행사 종료일 중 하나라도 과거면 제외 (접수기간 강화)
-    deadline = _parse_date(event.get("deadline")) or _parse_date(event.get("application_end"))
-    app_start = _parse_date(event.get("application_start"))
-    app_end = _parse_date(event.get("application_end"))
+    # 2) 행사가 끝났는지만으로 판단 (접수 마감은 제외 사유가 아님 — 접수 마감이어도 행사가 미래면 유지)
     end_date = _parse_date(event.get("end_date"))
     start_date = _parse_date(event.get("start_date"))
-
-    # 접수 마감이 과거면 마감
-    if deadline and deadline < today:
-        return True
-    if app_end and app_end < today:
-        return True
-    # 접수 시작이 없고 마감이 과거면 이미 종료 — 이미 위에서 처리
-    # end_date가 과거면 종료
+    # end_date가 과거면 행사 종료
     if end_date and end_date < today:
         return True
-    # start_date가 과거 90일 이상이면 오래된 행사로 제외 (기존 30일 → 90일로 완화하되 2025는 이미 위에서 걸러짐)
-    # 대신, start_date가 오늘보다 30일 이상 과거이고 end_date/deadline이 없으면 제외
-    if not deadline and not app_end and not end_date and start_date and (today - start_date).days > 30:
+    # end_date가 없고 start_date만 있고, start가 30일 이상 과거이면 오래된 행사로 제외
+    # (application 마감만 과거이고 행사는 미래면 유지 — ex: Spooktober deadline 09-01, event 10-01)
+    deadline = _parse_date(event.get("deadline")) or _parse_date(event.get("application_end"))
+    app_end = _parse_date(event.get("application_end"))
+    if not end_date and not deadline and not app_end and start_date and (today - start_date).days > 30:
         return True
-    # 접수기간이 모두 과거인데 행사일이 미래로 둔갑한 경우 방지: application_end가 과거면 위에서 이미 True
     return False
 
 
