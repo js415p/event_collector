@@ -12,21 +12,24 @@
 3. status는 현재 날짜 기준: upcoming(예정), ongoing(진행중), closed(마감/종료), cancelled(취소) 중 하나.
    - deadline/end_date가 {today}보다 과거면 closed로 분류
    - "접수 마감", "종료됨", "취소" 표현이 있으면 해당 status
-4. 날짜는 모두 YYYY-MM-DD 형식으로 정규화. 시간 모호하면 00:00, 연도 모호하면 {year}로 가정.
-5. location은 "온라인" 또는 "오프라인: 도시/장소" 형식. 온라인 병행이면 "오프라인: 장소 / 온라인"으로 표기.
-6. url은 원본 링크 우선, 없으면 검색 결과 링크.
-7. relevance_score: 0.0~1.0, 게임 개발 동아리 참가 적합도. 주최가 충북대/충북대학교/CBNU 또는 전국 연합동아리이면 0.15 가산, 국가(콘진원/문체부)/지자체 주최면 0.05 가산.
-8. 해외 오프라인 행사는 location에 국가/도시를 명확히 기재. (validator가 해외 오프라인을 제외하므로 정확히 표기)
-9. 반드시 JSON 배열만 출력하고, 다른 텍스트는 출력하지 마라.
+4. 날짜는 모두 YYYY-MM-DD 형식으로 정규화. 시간 모호하면 00:00, 연도 모호하면 {year}로 가정. **2025년 행사는 절대 포함하지 말고, 모든 날짜는 2026년 이후만 추출. 과거(오늘 이전) 마감/종료 행사는 status=closed로.**
+5. 접수기간(application_start ~ application_end, 또는 deadline)은 반드시 추출하여 표시. 없으면 null.
+6. location은 "온라인" 또는 "오프라인: 도시/장소" 형식. 온라인 병행이면 "오프라인: 장소 / 온라인"으로 표기.
+7. url은 원본 링크 우선, 없으면 검색 결과 링크.
+8. relevance_score: 0.0~1.0, 게임 개발 동아리 참가 적합도. 주최가 충북대/충북대학교/CBNU 또는 전국 연합동아리이면 0.15 가산, 국가(콘진원/문체부)/지자체 주최면 0.05 가산.
+9. 해외 오프라인 행사는 location에 국가/도시를 명확히 기재. (validator가 해외 오프라인을 제외하므로 정확히 표기)
+10. 반드시 JSON 배열만 출력하고, 다른 텍스트는 출력하지 마라.
 
 ## 출력 JSON 스키마 (배열)
 [
   {
     "title": "행사명 (원어 유지)",
     "category": "jam|conference|contest|competition|hackathon|showcase|demo_day|other",
-    "start_date": "YYYY-MM-DD or null",
-    "end_date": "YYYY-MM-DD or null",
-    "deadline": "YYYY-MM-DD or null (참가 신청 마감일, 없으면 null)",
+    "start_date": "YYYY-MM-DD or null (행사 시작일)",
+    "end_date": "YYYY-MM-DD or null (행사 종료일)",
+    "application_start": "YYYY-MM-DD or null (접수 시작일, 없으면 null)",
+    "application_end": "YYYY-MM-DD or null (접수 마감일, 없으면 null)",
+    "deadline": "YYYY-MM-DD or null (접수 마감일과 동일, 하위호환용)",
     "location": "온라인 or 오프라인: 장소",
     "url": "https://...",
     "source": "출처 도메인",

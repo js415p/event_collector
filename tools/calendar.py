@@ -88,8 +88,22 @@ def _build_event(ev: dict) -> dict:
         desc_parts.append(f"출처: {ev['source']}")
     if ev.get("category"):
         desc_parts.append(f"카테고리: {ev['category']}")
-    if ev.get("deadline"):
+    # 접수기간 표시 (강화)
+    app_start = ev.get("application_start")
+    app_end = ev.get("application_end") or ev.get("deadline")
+    if app_start and app_end:
+        desc_parts.append(f"접수기간: {app_start} ~ {app_end}")
+    elif app_end:
+        desc_parts.append(f"접수마감: {app_end}")
+    elif app_start:
+        desc_parts.append(f"접수시작: {app_start}")
+    elif ev.get("deadline"):
         desc_parts.append(f"마감: {ev['deadline']}")
+    # 행사 기간도 명시
+    if ev.get("start_date") or ev.get("end_date"):
+        period = f"{ev.get('start_date','')} ~ {ev.get('end_date','')}".strip(" ~")
+        if period:
+            desc_parts.append(f"행사기간: {period}")
     description = "\n".join(desc_parts)
 
     return {

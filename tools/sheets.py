@@ -8,7 +8,8 @@ from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
-HEADERS = ["id","title","category","start_date","end_date","deadline","location","url","source","status","discovered_at","calendar_event_id","last_updated"]
+HEADERS = ["id","title","category","start_date","end_date","application_start","application_end","deadline","location","url","source","status","discovered_at","calendar_event_id","last_updated"]
+# 하위호환: 기존 시트에 application_* 컬럼이 없으면 자동 마이그레이션
 SHEET_TITLE = os.getenv("SHEET_TITLE", "게임 외부행사 모음 (자동수집)")
 SHEET_TAB = os.getenv("SHEET_TAB", "events")
 
@@ -119,26 +120,60 @@ def ensure_sheet(sheets_service, drive_service) -> str | None:
         return None
 
 
+def _migrate_headers(sheets_service, spreadsheet_id: str):
+    """기존 시트가 구 헤더(13열)면 신 헤더(15열)로 마이그레이션: application_start/end 추가."""
+    try:
+        hdr = sheets_service.spreadsheets().values().get(
+            spreadsheetId=spreadsheet_id, range=f"'{SHEET_TAB}'!A1:O1"
+        ).execute()
+        cur = hdr.get("values", [[]])[0] if hdr.get("values") else []
+        if cur != HEADERS:
+            # 데이터 보존: 기존 행을 읽어 새 헤더 순서로 재배열
+            data = sheets_service.spreadsheets().values().get(
+                spreadsheetId=spreadsheet_id, range=f"'{SHEET_TAB}'!A2:O"
+            ).execute()
+            rows = data.get("values", [])
+            # 구 헤더 매핑
+            old_headers = cur if cur else ["id","title","category","start_date","end_date","deadline","location","url","source","status","discovered_at","calendar_event_id","last_updated"]
+            # deadline 동기화: application_end가 비어있으면 deadline 값으로 채움
+            new_rows = []
+            for r in rows:
+                r = r + [""] * (len(HEADERS) - len(r))
+                # 구 데이터가 13열이고 신 헤더 15열이면 deadline 위치가 달라짐 — 매핑으로 재구성
+                row_dict = {}
+                for i, h in enumerate(old_headers):
+                    if i < len(r):
+                        row_dict[h] = r[i]
+                # deadline -> application_end 동기화
+                if not row_dict.get("application_end") and row_dict.get("deadline"):
+                    row_dict["application_end"] = row_dict["deadline"]
+                # deadline이 비어있고 application_end가 있으면 동기화
+                if not row_dict.get("deadline") and row_dict.get("application_end"):
+                    row_dict["deadline"] = row_dict["application_end"]
+                new_row = [row_dict.get(h, "") for h in HEADERS]
+                new_rows.append(new_row)
+            # 헤더 교체
+            sheets_service.spreadsheets().values().update(
+                spreadsheetId=spreadsheet_id, range=f"'{SHEET_TAB}'!A1:O1",
+                valueInputOption="RAW", body={"values": [HEADERS]}
+            ).execute()
+            if new_rows:
+                sheets_service.spreadsheets().values().update(
+                    spreadsheetId=spreadsheet_id, range=f"'{SHEET_TAB}'!A2",
+                    valueInputOption="RAW", body={"values": new_rows}
+                ).execute()
+            logger.info(f"Migrated headers: {old_headers} -> {HEADERS}, rows {len(new_rows)}")
+    except Exception as e:
+        logger.warning(f"Header migration failed: {e}")
+
 def _ensure_tab(sheets_service, spreadsheet_id: str) -> int:
     """SHEET_TAB이 없으면 생성하고 헤더를 쓴다. sheetId 반환."""
     try:
         meta = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
         for s in meta.get("sheets", []):
             if s["properties"]["title"] == SHEET_TAB:
-                # 헤더가 비었으면 채움
-                try:
-                    hdr = sheets_service.spreadsheets().values().get(
-                        spreadsheetId=spreadsheet_id, range=f"'{SHEET_TAB}'!A1:M1"
-                    ).execute()
-                    if not hdr.get("values"):
-                        sheets_service.spreadsheets().values().update(
-                            spreadsheetId=spreadsheet_id,
-                            range=f"'{SHEET_TAB}'!A1:M1",
-                            valueInputOption="RAW",
-                            body={"values": [HEADERS]},
-                        ).execute()
-                except Exception:
-                    pass
+                # 헤더 마이그레이션 체크
+                _migrate_headers(sheets_service, spreadsheet_id)
                 return s["properties"]["sheetId"]
         # 없으면 생성
         logger.info(f"Tab '{SHEET_TAB}' not found — creating")
@@ -150,7 +185,7 @@ def _ensure_tab(sheets_service, spreadsheet_id: str) -> int:
         # 헤더
         sheets_service.spreadsheets().values().update(
             spreadsheetId=spreadsheet_id,
-            range=f"'{SHEET_TAB}'!A1:M1",
+            range=f"'{SHEET_TAB}'!A1:O1",
             valueInputOption="RAW",
             body={"values": [HEADERS]},
         ).execute()
@@ -163,7 +198,7 @@ def _ensure_tab(sheets_service, spreadsheet_id: str) -> int:
                                                                    "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}}}},
                                     "fields": "userEnteredFormat(backgroundColor,textFormat)"}},
                     {"setBasicFilter": {"filter": {"range": {"sheetId": new_sheet_id, "startRowIndex": 0}}}},
-                    {"autoResizeDimensions": {"dimensions": {"sheetId": new_sheet_id, "dimension": "COLUMNS", "startIndex": 0, "endIndex": 13}}},
+                    {"autoResizeDimensions": {"dimensions": {"sheetId": new_sheet_id, "dimension": "COLUMNS", "startIndex": 0, "endIndex": 15}}},
                 ]},
             ).execute()
         except Exception as e:
@@ -209,6 +244,13 @@ def write_events(events: list[dict]) -> dict:
     existing_ids = _load_existing_ids(sheets_svc, spreadsheet_id)
     now_str = datetime.now(SEOUL).strftime("%Y-%m-%d %H:%M:%S")
 
+    # 보정: application_end <-> deadline 동기화 (행 생성 전)
+    for ev in events:
+        if not ev.get("application_end") and ev.get("deadline"):
+            ev["application_end"] = ev["deadline"]
+        if not ev.get("deadline") and ev.get("application_end"):
+            ev["deadline"] = ev["application_end"]
+
     rows_to_append = []
     skipped = 0
     for ev in events:
@@ -227,7 +269,6 @@ def write_events(events: list[dict]) -> dict:
     if not rows_to_append:
         logger.info(f"Sheets: all {len(events)} events already exist — nothing to append")
         return {"inserted": 0, "skipped": skipped, "sheet_id": spreadsheet_id}
-
     # batch append (60/min 제한 대응: 한 번에) — 탭 보장 후
     _ensure_tab(sheets_svc, spreadsheet_id)
     try:
@@ -237,7 +278,7 @@ def write_events(events: list[dict]) -> dict:
             try:
                 sheets_svc.spreadsheets().values().append(
                     spreadsheetId=spreadsheet_id,
-                    range=f"'{SHEET_TAB}'!A:M",
+                    range=f"'{SHEET_TAB}'!A:O",
                     valueInputOption="RAW",
                     insertDataOption="INSERT_ROWS",
                     body={"values": rows_to_append},

@@ -32,31 +32,58 @@ def _parse_date(s: str | None) -> date | None:
         return None
 
 
+def _has_2025(event: dict) -> bool:
+    """제목/날짜에 2025가 포함되면 2025 행사로 간주 (강화 검증)."""
+    # 날짜 필드 year 체크
+    for key in ("start_date", "end_date", "deadline", "application_start", "application_end"):
+        d = _parse_date(event.get(key))
+        if d and d.year == 2025:
+            return True
+        # 문자열에 2025가 그대로 있으면 (파싱 실패해도) 의심
+        val = event.get(key)
+        if isinstance(val, str) and "2025" in val:
+            return True
+    # 제목에 2025가 있고 2026이 없으면 2025 행사로 간주 (예: "2025 게임잼")
+    title = event.get("title") or ""
+    if "2025" in title and "2026" not in title:
+        return True
+    return False
+
 def is_expired(event: dict, today: date | None = None) -> bool:
     """True면 마감/종료로 제외해야 함."""
     if today is None:
         today = datetime.now(SEOUL).date()
+
+    # 0) 2025년 행사는 무조건 제외 (강화)
+    if _has_2025(event):
+        return True
 
     # 1) Gemini status가 closed/cancelled면 즉시 제외
     status = (event.get("status") or "").strip().lower()
     if status in ("closed", "cancelled", "expired"):
         return True
 
-    # 2) deadline 우선, 없으면 end_date로 판단
-    deadline = _parse_date(event.get("deadline"))
+    # 2) 접수기간/마감일/행사 종료일 중 하나라도 과거면 제외 (접수기간 강화)
+    deadline = _parse_date(event.get("deadline")) or _parse_date(event.get("application_end"))
+    app_start = _parse_date(event.get("application_start"))
+    app_end = _parse_date(event.get("application_end"))
     end_date = _parse_date(event.get("end_date"))
     start_date = _parse_date(event.get("start_date"))
 
-    # deadline이 과거면 마감
+    # 접수 마감이 과거면 마감
     if deadline and deadline < today:
         return True
+    if app_end and app_end < today:
+        return True
+    # 접수 시작이 없고 마감이 과거면 이미 종료 — 이미 위에서 처리
     # end_date가 과거면 종료
     if end_date and end_date < today:
         return True
-    # 둘 다 없고 start_date만 있고 과거 30일 이상이면 종료로 간주 (오래된 행사)
-    if not deadline and not end_date and start_date and (today - start_date).days > 30:
+    # start_date가 과거 90일 이상이면 오래된 행사로 제외 (기존 30일 → 90일로 완화하되 2025는 이미 위에서 걸러짐)
+    # 대신, start_date가 오늘보다 30일 이상 과거이고 end_date/deadline이 없으면 제외
+    if not deadline and not app_end and not end_date and start_date and (today - start_date).days > 30:
         return True
-
+    # 접수기간이 모두 과거인데 행사일이 미래로 둔갑한 경우 방지: application_end가 과거면 위에서 이미 True
     return False
 
 
