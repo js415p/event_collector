@@ -41,12 +41,16 @@ def _get_service():
         return None
 
 
-def _event_id(title: str, start_date: str, url: str) -> str:
-    """Calendar eventId: 소문자, 5~1024자, a-z0-9- 만 허용. 해시 기반."""
+def _event_id(title: str, start_date: str, url: str, suffix: str = "") -> str:
+    """Calendar eventId: 소문자, 5~1024자, a-z0-9 만 허용(하이픈 불가 — 그룹 캘린더에서 400). 해시 기반.
+    suffix: 'a' = 접수기간, 'e' = 본행사, '' = 레거시 단일 이벤트(마이그레이션용)
+    """
     raw = f"{(title or '').strip().lower()}|{(start_date or '').strip()}|{(url or '').strip().lower()}"
     h = hashlib.sha1(raw.encode()).hexdigest()[:20]
-    # prefix로 식별
-    return f"evt{h}"
+    base = f"evt{h}"
+    if suffix:
+        return f"{base}{suffix}"
+    return base
 
 
 def _parse_date(s: str | None):
@@ -65,54 +69,73 @@ def _parse_date(s: str | None):
             return None
 
 
-def _build_event(ev: dict) -> dict:
-    start = _parse_date(ev.get("start_date")) or _parse_date(ev.get("deadline"))
-    end = _parse_date(ev.get("end_date"))
-    if start is None:
-        # 날짜 없으면 deadline 또는 오늘+7일
-        start = datetime.now(SEOUL).date()
-    if end is None:
-        end = start + timedelta(days=1)
-    # Calendar는 end가 exclusive (하루 종일 이벤트: end = 다음날)
-    end_exclusive = end + timedelta(days=1)
-
+def _build_event(ev: dict, kind: str = "event") -> dict:
+    """kind: 'application' = 접수기간, 'event' = 본행사"""
     title = ev.get("title", "제목 없음")
     location = ev.get("location", "")
     url = ev.get("url", "")
-    desc_parts = []
-    if ev.get("description"):
-        desc_parts.append(ev["description"])
-    if url:
-        desc_parts.append(f"링크: {url}")
-    if ev.get("source"):
-        desc_parts.append(f"출처: {ev['source']}")
-    if ev.get("category"):
-        desc_parts.append(f"카테고리: {ev['category']}")
-    # 접수기간 표시 (강화)
-    app_start = ev.get("application_start")
-    app_end = ev.get("application_end") or ev.get("deadline")
-    if app_start and app_end:
-        desc_parts.append(f"접수기간: {app_start} ~ {app_end}")
-    elif app_end:
-        desc_parts.append(f"접수마감: {app_end}")
-    elif app_start:
-        desc_parts.append(f"접수시작: {app_start}")
-    elif ev.get("deadline"):
-        desc_parts.append(f"마감: {ev['deadline']}")
-    # 행사 기간도 명시
-    if ev.get("start_date") or ev.get("end_date"):
-        period = f"{ev.get('start_date','')} ~ {ev.get('end_date','')}".strip(" ~")
-        if period:
-            desc_parts.append(f"행사기간: {period}")
-    description = "\n".join(desc_parts)
+    category = ev.get("category", "event")
+
+    if kind == "application":
+        start = _parse_date(ev.get("application_start")) or _parse_date(ev.get("application_end")) or _parse_date(ev.get("deadline"))
+        end = _parse_date(ev.get("application_end")) or _parse_date(ev.get("deadline")) or start
+        if start is None:
+            return None  # 접수기간 없으면 생성 안 함
+        if end is None:
+            end = start
+        end_exclusive = end + timedelta(days=1)
+        summary = f"[접수] {title}"
+        # 접수기간 색상: 귤색(6, Tangerine) — 캘린더에서 눈에 띔
+        color_id = "6"
+        desc_parts = []
+        if ev.get("description"):
+            desc_parts.append(ev["description"])
+        desc_parts.append(f"접수기간: {ev.get('application_start') or ''} ~ {ev.get('application_end') or ev.get('deadline') or ''}".strip(" ~"))
+        if ev.get("start_date") or ev.get("end_date"):
+            desc_parts.append(f"본행사: {ev.get('start_date','')} ~ {ev.get('end_date','')}".strip(" ~"))
+        if url:
+            desc_parts.append(f"링크: {url}")
+        if ev.get("source"):
+            desc_parts.append(f"출처: {ev['source']}")
+        desc_parts.append(f"카테고리: {category}")
+        description = "\n".join([p for p in desc_parts if p])
+    else:
+        start = _parse_date(ev.get("start_date"))
+        end = _parse_date(ev.get("end_date"))
+        if start is None:
+            # 본행사 날짜 없으면 생성 안 함 (접수만 있는 경우)
+            return None
+        if end is None:
+            end = start
+        end_exclusive = end + timedelta(days=1)
+        summary = f"[{category}] {title}"
+        # 본행사 색상: 바질(10, Basil) — 녹색 계열, 접수와 대비
+        color_id = "10"
+        desc_parts = []
+        if ev.get("description"):
+            desc_parts.append(ev["description"])
+        app_start = ev.get("application_start")
+        app_end = ev.get("application_end") or ev.get("deadline")
+        if app_start and app_end:
+            desc_parts.append(f"접수기간: {app_start} ~ {app_end}")
+        elif app_end:
+            desc_parts.append(f"접수기간: ~ {app_end}")
+        if url:
+            desc_parts.append(f"링크: {url}")
+        if ev.get("source"):
+            desc_parts.append(f"출처: {ev['source']}")
+        desc_parts.append(f"카테고리: {category}")
+        desc_parts.append(f"본행사: {ev.get('start_date','')} ~ {ev.get('end_date','')}".strip(" ~"))
+        description = "\n".join([p for p in desc_parts if p])
 
     return {
-        "summary": f"[{ev.get('category','event')}] {title}",
+        "summary": summary,
         "location": location,
         "description": description,
         "start": {"date": start.isoformat()},
         "end": {"date": end_exclusive.isoformat()},
         "transparency": "transparent",
+        "colorId": color_id,
         "source": {"url": url, "title": title} if url else None,
     }
 
@@ -152,28 +175,21 @@ def write_events(events: list[dict]) -> dict:
     skipped = 0
     errors = []
 
-    for ev in events:
-        eid = _event_id(ev.get("title",""), ev.get("start_date","") or "", ev.get("url",""))
-        body = _build_event(ev)
-        body["id"] = eid
-        # 429 백오프
+    def _upsert_event(eid: str, body: dict):
+        nonlocal inserted, skipped
         for attempt in range(3):
             try:
-                # 존재 여부 확인
                 try:
-                    existing = svc.events().get(calendarId=calendar_id, eventId=eid).execute()
-                    # 이미 있으면 스킵 (업데이트 필요 시 patch로 교체 가능)
+                    svc.events().get(calendarId=calendar_id, eventId=eid).execute()
                     logger.debug(f"Calendar event {eid} already exists, skip")
                     skipped += 1
-                    break
+                    return
                 except Exception as ge:
                     if "404" not in str(ge) and "Not Found" not in str(ge):
-                        # 404가 아니면 조회 실패로 간주하고 insert 시도
                         pass
-                    # 없으면 insert
                     svc.events().insert(calendarId=calendar_id, body=body).execute()
                     inserted += 1
-                    break
+                    return
             except Exception as e:
                 msg = str(e)
                 is_rate = "429" in msg or "quota" in msg.lower() or "403" in msg
@@ -182,12 +198,46 @@ def write_events(events: list[dict]) -> dict:
                     continue
                 if "alreadyExists" in msg or "409" in msg:
                     skipped += 1
-                    break
-                logger.warning(f"Calendar insert failed for {ev.get('title')}: {e}")
+                    return
+                logger.warning(f"Calendar insert failed for {body.get('summary')}: {e}")
                 errors.append(str(e)[:200])
-                break
-        # 600/min/user 제한 보호: 이벤트 간 짧은 딜레이
+                return
         time.sleep(0.2)
+
+    for ev in events:
+        base_hash = _event_id(ev.get("title",""), ev.get("start_date","") or "", ev.get("url",""))
+        # 레거시 단일 이벤트 정리: evt<hash> 가 있으면 삭제 (이제 2개로 분리됨)
+        try:
+            svc.events().get(calendarId=calendar_id, eventId=base_hash).execute()
+            try:
+                svc.events().delete(calendarId=calendar_id, eventId=base_hash).execute()
+                logger.info(f"Deleted legacy event {base_hash} ({ev.get('title')})")
+                time.sleep(0.2)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        # 1) 접수기간 이벤트 (주황, color 6)
+        app_body = _build_event(ev, kind="application")
+        if app_body:
+            app_id = _event_id(ev.get("title",""), ev.get("start_date","") or "", ev.get("url",""), suffix="a")
+            app_body["id"] = app_id
+            _upsert_event(app_id, app_body)
+            time.sleep(0.2)
+
+        # 2) 본행사 이벤트 (초록, color 10)
+        evt_body = _build_event(ev, kind="event")
+        if evt_body:
+            evt_id = _event_id(ev.get("title",""), ev.get("start_date","") or "", ev.get("url",""), suffix="e")
+            evt_body["id"] = evt_id
+            _upsert_event(evt_id, evt_body)
+            time.sleep(0.2)
+
+        # 둘 다 없으면 (날짜 전부 없음) — 기존 로직대로 최소 1개는 생성하지 않음
+        if not app_body and not evt_body:
+            logger.warning(f"Calendar skip: no dates for {ev.get('title')}")
+            errors.append(f"No dates: {ev.get('title')}")
 
     logger.info(f"Calendar: inserted={inserted} skipped={skipped} calendar={calendar_id}")
     return {"inserted": inserted, "skipped": skipped, "calendar_id": calendar_id, "errors": errors[:5] if errors else None}
